@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SafeRoute — тестовый стенд</title>
+  <style>
+    :root { color-scheme: light; font-family: "Segoe UI", system-ui, sans-serif; color: #17243a; background: #eef2f6; }
+    * { box-sizing: border-box; }
+    [hidden] { display: none !important; }
+    body { margin: 0 auto; width: min(100% - 2rem, 1040px); padding: 2rem 0; line-height: 1.5; }
+    header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem; }
+    h1, h2, p { margin: 0; }
+    p { margin-top: .5rem; }
+    h1 { font-size: 2rem; }
+    h2 { font-size: 1.2rem; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin: 1.25rem 0; }
+    section, details { background: white; padding: 1.15rem; border-radius: 1rem; border: 1px solid #d8e1eb; }
+    .stack { display: grid; gap: .7rem; margin: .8rem 0; }
+    .row { display: flex; flex-wrap: wrap; align-items: center; gap: .55rem; }
+    .inset { background: #eff5fa; border-radius: .65rem; padding: .85rem; }
+    .muted { color: #43566b; }
+    .error { min-height: 1.5rem; color: #922322; }
+    label { display: grid; gap: .25rem; }
+    input, textarea, select, button { max-width: 100%; font: inherit; padding: .48rem .68rem; border: 1px solid #718197; border-radius: .45rem; background: white; color: inherit; }
+    textarea { width: 100%; resize: vertical; }
+    button { cursor: pointer; }
+    button.primary { background: #154f67; border-color: #154f67; color: white; }
+    button:focus-visible, select:focus-visible, textarea:focus-visible, input:focus-visible { outline: 3px solid #1487a6; outline-offset: 2px; }
+    button:disabled { opacity: .55; cursor: default; }
+    summary { cursor: pointer; font-weight: 650; }
+    ol { padding-left: 1.5rem; overflow-wrap: anywhere; }
+    li + li { margin-top: .35rem; }
+    @media (max-width: 660px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>SafeRoute</h1>
+      <p class="muted">Локальный стенд. Переводы и данные вымышлены.</p>
+    </div>
+    <label>Режим стенда
+      <select id="mode">
+        <option value="active">Активный</option>
+        <option value="shadow">Теневой</option>
+      </select>
+    </label>
+  </header>
+  <p class="error" id="error" role="alert"></p>
+  <div class="grid">
+    <section aria-labelledby="client-title">
+      <header>
+        <h2 id="client-title">Клиент</h2>
+        <label>Язык / Тіл
+          <select id="language"><option value="ru">Русский</option><option value="kk">Қазақша</option></select>
+        </label>
+      </header>
+      <form id="transfer-form" class="stack">
+        <label><span id="scenario-label">Тестовый сценарий</span>
+          <select id="scenario">
+            <option value="unusual">Новый получатель, необычная сумма</option>
+            <option value="urgent">Новый получатель, признак срочности</option>
+            <option value="regular">Знакомый получатель</option>
+            <option value="blocked">Операция отклонена базовой проверкой</option>
+          </select>
+        </label>
+        <label><span id="amount-label">Сумма, ₸</span>
+          <input id="amount" value="250000" type="number" min="1" max="1000000000" step="1" required>
+        </label>
+        <button id="confirm" class="primary">Подтвердить перевод</button>
+      </form>
+      <label id="client-history" class="stack" hidden>
+        <span id="history-label">Поручение</span>
+        <select id="client-transfer"></select>
+      </label>
+      <div id="client-status" class="inset" aria-live="polite"></div>
+    </section>
+    <section aria-labelledby="operator-title">
+      <h2 id="operator-title">Сотрудник банка</h2>
+      <p class="muted">Обе роли доступны на стенде. В пилоте сотрудник работает в отдельной авторизованной системе банка.</p>
+      <div class="stack">
+        <label>Обращение
+          <select id="queue" aria-label="Поручения на проверке"></select>
+        </label>
+        <p id="queue-status" class="muted"></p>
+        <label>Основание решения
+          <textarea id="note" rows="3" maxlength="300" placeholder="Как проверены обстоятельства перевода? Используйте вымышленные данные."></textarea>
+        </label>
+        <div class="row">
+          <button id="approve" class="primary">Одобрить после проверки</button>
+          <button id="reject">Отклонить</button>
+        </div>
+      </div>
+    </section>
+  </div>
+  <details open>
+    <summary>Журнал решений и тестовый реестр</summary>
+    <p id="payments" class="muted"></p>
+    <ol id="events"></ol>
+  </details>
+  <script>
+    const token = "__DEMO_TOKEN__";
+    const el = id => document.getElementById(id);
+    const language = el("language");
+    const queue = el("queue");
+    let state;
+    let latestRefresh = 0;
+    let currentId;
+    let draft;
+    let busy = false;
+    const labels = {
+      ru: {
+        client: "Клиент", scenario: "Тестовый сценарий", amount: "Сумма, ₸",
+        confirm: "Подтвердить перевод", empty: "Пока нет перевода.", history: "Поручение",
+        held: "Перевод на паузе. Деньги пока не отправлены.",
+        sent: "Перевод отправлен в тестовый реестр.",
+        declined: "Перевод отклонён. Деньги не отправлены.",
+        cancelled: "Перевод отменён. Деньги не отправлены.",
+        expired: "Срок проверки истёк. Деньги не отправлены.",
+        contact: "Связаться с банком", cancel: "Отменить перевод",
+        reconfirm: "Подтвердить ещё раз (тест)", contacted: "Обращение открыто.",
+        scenarios: ["Новый получатель, необычная сумма", "Новый получатель, признак срочности",
+          "Знакомый получатель", "Операция отклонена базовой проверкой"]
+      },
+      kk: {
+        client: "Клиент", scenario: "Сынақ сценарийі", amount: "Сома, ₸",
+        confirm: "Аударымды растау", empty: "Аударым әлі жасалған жоқ.", history: "Төлем тапсырмасы",
+        held: "Аударым уақытша тоқтатылды. Ақша әлі жіберілген жоқ.",
+        sent: "Аударым сынақ тізіліміне жіберілді.",
+        declined: "Аударым қабылданбады. Ақша жіберілген жоқ.",
+        cancelled: "Аударым жойылды. Ақша жіберілген жоқ.",
+        expired: "Тексеру мерзімі аяқталды. Ақша жіберілген жоқ.",
+        contact: "Банкке хабарласу", cancel: "Аударымнан бас тарту",
+        reconfirm: "Қайта растау (сынақ)", contacted: "Өтініш ашылды.",
+        scenarios: ["Жаңа алушы, әдеттен тыс сома", "Жаңа алушы, шұғылдық белгісі",
+          "Бұрынғы алушы", "Аударым бастапқы тексерістен өтпеді"]
+      }
+    };
+    const eventLabels = {
+      held: "Удержан", sent: "Отправлен", declined: "Отклонён", cancelled: "Отменён",
+      expired: "Срок проверки истёк", would_hold: "Теневой сигнал",
+      mode_changed: "Режим изменён", reconfirm: "Повторное подтверждение клиента", contact: "Обращение в банк"
+    };
+    const amountLabel = new Intl.NumberFormat("ru-KZ");
+    const money = amount => amountLabel.format(amount) + " ₸";
+    const shortId = id => id.slice(0, 8);
+    const hasContact = id => state.events.some(event => event.transfer_id === id && event.kind === "contact");
+
+    async function api(path, data) {
+      const options = {headers: {"X-Demo-Token": token}};
+      if (data !== undefined) {
+        options.method = "POST";
+        options.headers["Content-Type"] = "application/json";
+        options.body = JSON.stringify(data);
+      }
+      const response = await fetch("/api/" + path, options);
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error);
+      return result;
+    }
+
+    async function refresh() {
+      const sequence = ++latestRefresh;
+      const next = await api("state");
+      if (sequence !== latestRefresh) return;
+      const changed = !state || next.mode !== state.mode ||
+        next.events[0]?.id !== state.events[0]?.id;
+      state = next;
+      if (changed || currentId === undefined) render();
+    }
+
+    function clientAction(action, caption, className = "") {
+      const btn = document.createElement("button");
+      btn.textContent = caption;
+      btn.className = className;
+      btn.onclick = () => mutate(() => api("resolve", {transfer_id: currentId, action}));
+      return btn;
+    }
+
+    function render() {
+      const copy = labels[language.value];
+      el("client-title").textContent = copy.client;
+      el("scenario-label").textContent = copy.scenario;
+      el("amount-label").textContent = copy.amount;
+      el("confirm").textContent = copy.confirm;
+      el("history-label").textContent = copy.history;
+      Array.from(el("scenario").options).forEach((option, index) => {
+        option.textContent = copy.scenarios[index];
+      });
+      if (!state) return;
+      el("mode").value = state.mode;
+      currentId ??= state.transfers[0]?.id;
+      el("client-history").hidden = state.transfers.length === 0;
+      const history = el("client-transfer");
+      history.replaceChildren(...state.transfers.map(item => new Option(
+        money(item.amount) + " · " + shortId(item.id), item.id
+      )));
+      if (currentId) history.value = currentId;
+      const transfer = state.transfers.find(item => item.id === currentId);
+      const box = el("client-status");
+      box.lang = language.value;
+      const status = document.createElement("strong");
+      status.textContent = transfer ? copy[transfer.state] : copy.empty;
+      box.replaceChildren(status);
+      if (transfer?.state === "held") {
+        const row = document.createElement("div");
+        row.className = "row";
+        if (hasContact(transfer.id)) {
+          const contacted = document.createElement("p");
+          contacted.textContent = copy.contacted;
+          box.append(contacted);
+        } else {
+          row.append(clientAction("contact", copy.contact, "primary"));
+        }
+        row.append(clientAction("cancel", copy.cancel), clientAction("reconfirm", copy.reconfirm));
+        box.append(row);
+      }
+      const oldSelection = queue.value;
+      const waiting = state.transfers.filter(item => item.state === "held" && hasContact(item.id));
+      queue.replaceChildren();
+      for (const item of waiting) {
+        queue.append(new Option(shortId(item.id) + " · " + money(item.amount), item.id));
+      }
+      if (waiting.some(item => item.id === oldSelection)) queue.value = oldSelection;
+      if (queue.value !== oldSelection) el("note").value = "";
+      updateQueue();
+
+      el("payments").textContent = "Записей об отправке: " + state.payments.length +
+        " · сумма " + money(state.payments.reduce((sum, item) => sum + item.amount, 0));
+      const events = state.events.slice(0, 15).map(event => {
+        const li = document.createElement("li");
+        let caption = eventLabels[event.kind];
+        if (event.transfer_id) caption += " · " + shortId(event.transfer_id);
+        if (event.kind === "mode_changed") caption += event.note === "shadow" ? " · теневой" : " · активный";
+        if (event.actor === "operator") caption += " · " + event.note;
+        li.textContent = caption;
+        return li;
+      });
+      el("events").replaceChildren(...events);
+    }
+
+    function updateQueue() {
+      const waiting = Boolean(queue.value);
+      el("queue-status").textContent = waiting
+        ? "В учебном разговоре выясните, кто попросил сделать перевод и кому он предназначен."
+        : "Нет открытых обращений.";
+      el("approve").disabled = !waiting;
+      el("reject").disabled = !waiting;
+    }
+
+    async function mutate(action) {
+      if (busy) return;
+      busy = true;
+      el("error").textContent = "";
+      try {
+        await action();
+        await refresh();
+        render();
+      } catch (error) {
+        el("error").textContent = error.message;
+      } finally {
+        busy = false;
+      }
+    }
+
+    el("transfer-form").onsubmit = event => {
+      event.preventDefault();
+      mutate(async () => {
+        const scenario = el("scenario").value;
+        const amount = el("amount").valueAsNumber;
+        if (draft?.scenario !== scenario || draft.amount !== amount) {
+          draft = {scenario, amount, id: crypto.randomUUID()};
+        }
+        await api("submit", {
+          transfer_id: draft.id, amount, new_payee: scenario !== "regular",
+          unusual_amount: scenario === "unusual", urgent: scenario === "urgent",
+          blocked: scenario === "blocked"
+        });
+        currentId = draft.id;
+        draft = undefined;
+      });
+    };
+    for (const action of ["approve", "reject"]) {
+      el(action).onclick = () => mutate(() => api("resolve", {
+        transfer_id: queue.value, action, note: el("note").value
+      }));
+    }
+    queue.onchange = () => {
+      el("note").value = "";
+      updateQueue();
+    };
+    language.onchange = render;
+    el("client-transfer").onchange = event => {
+      currentId = event.target.value;
+      render();
+    };
+    el("mode").onchange = event => mutate(() => api("mode", {mode: event.target.value}));
+    refresh().catch(error => { el("error").textContent = error.message; });
+    setInterval(() => {
+      if (!busy) refresh().catch(error => { el("error").textContent = error.message; });
+    }, 3000);
+  </script>
+</body>
+</html>
